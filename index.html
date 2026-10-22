@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Whisper Chiaroscuro — Формантный тренажёр</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-deep: #171513;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100dvh;
+      overflow: hidden;
+      background-color: var(--bg-deep);
+      color: #e7e2da;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); opacity: 0.7; }
+      50% { transform: scale(1.06); opacity: 0.3; }
+      100% { transform: scale(0.95); opacity: 0.7; }
+    }
+
+    .mic-pulse {
+      animation: pulse-ring 2.4s infinite ease-in-out;
+    }
+
+    #visualizer-canvas {
+      touch-action: none;
+      cursor: grab;
+    }
+
+    #visualizer-canvas:active {
+      cursor: grabbing;
+    }
+
+    #calibrate-hold-btn {
+      touch-action: none;
+    }
+
+    #calibrate-hold-btn.calibrating-active {
+      background: rgba(214, 199, 178, 0.22);
+      border-color: #d6c7b2;
+      color: #f5f2ed;
+      transform: scale(0.985);
+    }
+  </style>
+</head>
+<body class="w-full h-full flex flex-col justify-between relative">
+
+  <div id="app-shell" class="w-full h-full flex flex-col p-2 sm:p-3 relative z-10">
+
+    <main class="w-full flex-1 relative rounded-2xl overflow-hidden bg-[#121515] border border-[#36312c] shadow-inner flex flex-col">
+      <canvas id="visualizer-canvas" class="w-full h-full block"></canvas>
+
+      <!-- Bottom Controls Row: Mic Toggle (Bottom-Left) + Calibration Button -->
+      <div id="controls-bar" class="hidden absolute bottom-3 left-3 right-3 flex items-center justify-between gap-2.5 pointer-events-none">
+        <button id="mic-toggle-btn" type="button"
+          class="pointer-events-auto py-3 px-4 rounded-xl bg-[#211e1b]/90 backdrop-blur-md border border-[#4a433c] text-[#e7e2da] font-semibold text-xs sm:text-sm flex items-center gap-2 shadow-xl active:scale-95 transition cursor-pointer shrink-0">
+          <span id="mic-status-dot" class="w-2 h-2 rounded-full bg-stone-500"></span>
+          <span id="mic-toggle-text">Микрофон: Вкл</span>
+        </button>
+
+        <button id="calibrate-hold-btn" type="button"
+          class="pointer-events-auto flex-1 py-3 px-5 rounded-xl bg-[#211e1b]/90 backdrop-blur-md border border-[#4a433c] text-[#e7e2da] font-semibold text-xs sm:text-sm tracking-wide shadow-xl flex items-center justify-center gap-2.5 transition-all duration-150 cursor-pointer">
+          <span id="calib-btn-dot" class="w-2 h-2 rounded-full bg-[#d6c7b2]"></span>
+          <span id="calib-btn-text">КАЛИБРОВКА</span>
+        </button>
+      </div>
+    </main>
+
+    <!-- Minimal Start Overlay without comments -->
+    <div id="start-overlay" class="absolute inset-0 z-30 bg-[#171513]/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center">
+      <div class="flex flex-col items-center">
+        <div class="relative flex items-center justify-center">
+          <div class="w-24 h-24 rounded-full bg-[#d6c7b2]/20 mic-pulse absolute"></div>
+          <button id="start-mic-btn" type="button" aria-label="Включить микрофон"
+            class="relative z-10 w-20 h-20 rounded-full bg-[#d6c7b2] text-[#1c1917] shadow-xl shadow-black/40 flex items-center justify-center active:scale-95 transition-transform duration-150 cursor-pointer">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-9 h-9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+              <line x1="12" x2="12" y1="19" y2="22"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div id="mic-error-box" class="hidden mt-6 max-w-xs p-3.5 rounded-xl bg-rose-950/90 border border-rose-700 text-rose-200 text-xs text-center leading-relaxed"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    (function () {
+      const ABS_MIN_HZ = 300;
+      const ABS_MAX_HZ = 5200;
+
+      // Range and spacing for detecting stable vocal tract formants
+      const FORMANT_SEARCH_MIN_HZ = 380;
+      const FORMANT_SEARCH_MAX_HZ = 4950;
+      const MIN_PEAK_SEPARATION_HZ = 310;
+      const TRACK_MATCH_RADIUS_HZ = 165;
+      const MAX_STABLE_DRIFT_HZ = 95;
+      const CONFIRM_STABLE_FRAMES = 12; // ~200ms of steady presence required before showing
+
+      // Dashed reference lines initialized to 2900 and 3800 Hz by default
+      let refLines = [2900, 3800];
+
+      // User-controlled frequency viewport with maximum scale by default
+      let displayMinHz = 700;
+      let displaySpanHz = 4200;
+      let displayMaxHz = displayMinHz + displaySpanHz;
+
+      let isCalibratingHold = false;
+
+      // Stateful multi-formant tracker list
+      let trackedFormants = [];
+      let nextTrackId = 1;
+
+      // Waterfall configuration and history buffer
+      const WATERFALL_SPEED_PX = 2;
+      const TOP_HEADER_HEIGHT = 86;
+      const MAX_HISTORY_ROWS = 600;
+      let ridgeHistory = [];
+
+      // Audio Web API objects
+      let audioCtx = null;
+      let mediaStream = null;
+      let sourceNode = null;
+      let analyser = null;
+      let rawFreqData = null;
+      let smoothedEnvelope = null;
+      let temporalSpectrum = null;
+      let normalizedRidge = null;
+      let isRunning = false;
+      let needsFullWaterfallRedraw = false;
+
+      const startOverlay = document.getElementById('start-overlay');
+      const startMicBtn = document.getElementById('start-mic-btn');
+      const micToggleBtn = document.getElementById('mic-toggle-btn');
+      const micStatusDot = document.getElementById('mic-status-dot');
+      const micToggleText = document.getElementById('mic-toggle-text');
+      const micErrorBox = document.getElementById('mic-error-box');
+      const controlsBar = document.getElementById('controls-bar');
+      const calibrateHoldBtn = document.getElementById('calibrate-hold-btn');
+      const calibBtnDot = document.getElementById('calib-btn-dot');
+      const calibBtnText = document.getElementById('calib-btn-text');
+
+      const canvas = document.getElementById('visualizer-canvas');
+      const ctx = canvas.getContext('2d');
+
+      const waterfallCanvas = document.createElement('canvas');
+      const waterfallCtx = waterfallCanvas.getContext('2d');
+
+      let canvasWidth = 320;
+      let canvasHeight = 460;
+      let waterfallHeight = 374;
+      let dpr = window.devicePixelRatio || 1;
+
+      // Precompute 256-level spectrogram LUT:
+      // Low saturation in dark tones -> gradually more vivid & chromatic as brightness increases -> white on peaks
+      const colorLUT = new Uint8Array(256 * 3);
+      (function buildColormap() {
+        const stops = [
+          { pos: 0.00, rgb: [18, 21, 21] },     // Very low-saturation dark charcoal-green
+          { pos: 0.22, rgb: [29, 38, 52] },     // Muted dark slate-blue
+          { pos: 0.44, rgb: [78, 46, 108] },    // Moderately saturated dusky violet
+          { pos: 0.66, rgb: [216, 86, 34] },    // Rich warm orange
+          { pos: 0.85, rgb: [252, 210, 42] },   // Vivid bright yellow
+          { pos: 1.00, rgb: [255, 255, 252] }   // Crisp white peak
+        ];
+        for (let i = 0; i < 256; i++) {
+          const t = i / 255;
+          let s0 = stops[0];
+          let s1 = stops[stops.length - 1];
+          for (let j = 0; j < stops.length - 1; j++) {
+            if (t >= stops[j].pos && t <= stops[j + 1].pos) {
+              s0 = stops[j];
+              s1 = stops[j + 1];
+              break;
+            }
+          }
+          const localT = s1.pos === s0.pos ? 0 : (t - s0.pos) / (s1.pos - s0.pos);
+          let r = s0.rgb[0] + (s1.rgb[0] - s0.rgb[0]) * localT;
+          let g = s0.rgb[1] + (s1.rgb[1] - s0.rgb[1]) * localT;
+          let b = s0.rgb[2] + (s1.rgb[2] - s0.rgb[2]) * localT;
+
+          // Additional saturation curve: darker shades stay muted, lighter shades get full chroma
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const satFactor = Math.min(1, Math.pow(t, 0.75) * 1.15);
+          r = lum + (r - lum) * satFactor;
+          g = lum + (g - lum) * satFactor;
+          b = lum + (b - lum) * satFactor;
+
+          colorLUT[i * 3] = Math.round(Math.max(0, Math.min(255, r)));
+          colorLUT[i * 3 + 1] = Math.round(Math.max(0, Math.min(255, g)));
+          colorLUT[i * 3 + 2] = Math.round(Math.max(0, Math.min(255, b)));
+        }
+      })();
+
+      function updateViewportBounds(newMinHz, newSpanHz) {
+        displaySpanHz = Math.max(1000, Math.min(4200, newSpanHz));
+        const maxAllowedMin = Math.max(ABS_MIN_HZ, ABS_MAX_HZ - displaySpanHz);
+        displayMinHz = Math.max(ABS_MIN_HZ, Math.min(maxAllowedMin, newMinHz));
+        displayMaxHz = displayMinHz + displaySpanHz;
+
+        needsFullWaterfallRedraw = true;
+      }
+
+      // Interactive state for dragging dashed reference lines & dropping into trash bin
+      let refBadgeRects = [];
+      let draggingRefIndex = -1;
+      let draggingPointerId = null;
+      let isHoveringTrash = false;
+
+      // Multi-touch pointer tracking for 1-finger drag pan and 2-finger pinch-to-zoom
+      const activePointers = new Map();
+      let dragStartX = 0;
+      let dragStartMinHz = 0;
+      let pinchStartDist = 0;
+      let pinchStartSpanHz = 4200;
+      let pinchAnchorFreq = 2400;
+
+      function getCanvasRelativeCoords(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: clientX - rect.left,
+          y: clientY - rect.top
+        };
+      }
+
+      function getTrashZoneRect(width) {
+        const zoneW = 46;
+        const zoneH = 52;
+        return {
+          x: width - zoneW - 8,
+          y: 16,
+          w: zoneW,
+          h: zoneH
+        };
+      }
+
+      function checkPointInTrash(relX, relY, width) {
+        const tr = getTrashZoneRect(width);
+        return (
+          relX >= tr.x - 6 &&
+          relX <= tr.x + tr.w + 8 &&
+          relY >= tr.y - 12 &&
+          relY <= tr.y + tr.h + 22
+        );
+      }
+
+      function findHitRefBadge(relX, relY) {
+        // Check from top-most to bottom-most badge with generous touch padding
+        for (let i = refBadgeRects.length - 1; i >= 0; i--) {
+          const b = refBadgeRects[i];
+          if (
+            relX >= b.x - 12 &&
+            relX <= b.x + b.w + 12 &&
+            relY >= b.y - 16 &&
+            relY <= b.y + b.h + 16
+          ) {
+            return b.index;
+          }
+        }
+        return -1;
+      }
+
+      function initGestureState() {
+        const pts = Array.from(activePointers.values());
+        if (pts.length === 1) {
+          dragStartX = pts[0].x;
+          dragStartMinHz = displayMinHz;
+        } else if (pts.length >= 2) {
+          const p1 = pts[0];
+          const p2 = pts[1];
+          pinchStartDist = Math.max(24, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+          pinchStartSpanHz = displaySpanHz;
+          const midRel = getCanvasRelativeCoords((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+          const normX = Math.max(0, Math.min(1, midRel.x / Math.max(1, canvasWidth)));
+          pinchAnchorFreq = displayMinHz + normX * displaySpanHz;
+        }
+      }
+
+      canvas.addEventListener('pointerdown', (e) => {
+        const rel = getCanvasRelativeCoords(e.clientX, e.clientY);
+
+        // Check if user grabbed a reference frequency badge on the ruler
+        if (activePointers.size === 0 && draggingRefIndex === -1) {
+          const hitIdx = findHitRefBadge(rel.x, rel.y);
+          if (hitIdx !== -1) {
+            draggingRefIndex = hitIdx;
+            draggingPointerId = e.pointerId;
+            isHoveringTrash = checkPointInTrash(rel.x, rel.y, canvasWidth);
+            if (canvas.setPointerCapture) {
+              try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+            }
+            if (!isRunning) drawVisualizer();
+            return;
+          }
+        }
+
+        activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (canvas.setPointerCapture) {
+          try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+        }
+        initGestureState();
+      });
+
+      window.addEventListener('pointermove', (e) => {
+        if (draggingRefIndex !== -1 && e.pointerId === draggingPointerId) {
+          const rel = getCanvasRelativeCoords(e.clientX, e.clientY);
+          const clampedX = Math.max(0, Math.min(canvasWidth, rel.x));
+          const newHz = Math.max(ABS_MIN_HZ, Math.min(ABS_MAX_HZ, xToFreq(clampedX, canvasWidth)));
+          refLines[draggingRefIndex] = newHz;
+          isHoveringTrash = checkPointInTrash(rel.x, rel.y, canvasWidth);
+          if (!isRunning) drawVisualizer();
+          return;
+        }
+
+        if (!activePointers.has(e.pointerId)) return;
+        activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+        const pts = Array.from(activePointers.values());
+        if (pts.length === 1) {
+          const dx = pts[0].x - dragStartX;
+          const hzPerPx = displaySpanHz / Math.max(1, canvasWidth);
+          updateViewportBounds(dragStartMinHz - dx * hzPerPx, displaySpanHz);
+          if (!isRunning) drawVisualizer();
+        } else if (pts.length >= 2) {
+          const p1 = pts[0];
+          const p2 = pts[1];
+          const currentDist = Math.max(24, Math.hypot(p2.x - p1.x, p2.y - p1.y));
+          const scaleFactor = pinchStartDist / currentDist;
+          const nextSpan = Math.max(1000, Math.min(4200, pinchStartSpanHz * scaleFactor));
+
+          const midRel = getCanvasRelativeCoords((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+          const normX = Math.max(0, Math.min(1, midRel.x / Math.max(1, canvasWidth)));
+          const nextMin = pinchAnchorFreq - normX * nextSpan;
+
+          updateViewportBounds(nextMin, nextSpan);
+          if (!isRunning) drawVisualizer();
+        }
+      });
+
+      function handlePointerEnd(e) {
+        if (draggingRefIndex !== -1 && e.pointerId === draggingPointerId) {
+          if (isHoveringTrash) {
+            refLines.splice(draggingRefIndex, 1);
+          }
+          draggingRefIndex = -1;
+          draggingPointerId = null;
+          isHoveringTrash = false;
+          if (!isRunning) drawVisualizer();
+          return;
+        }
+
+        if (!activePointers.has(e.pointerId)) return;
+        activePointers.delete(e.pointerId);
+        if (activePointers.size > 0) {
+          initGestureState();
+        }
+      }
+      window.addEventListener('pointerup', handlePointerEnd);
+      window.addEventListener('pointercancel', handlePointerEnd);
+
+      // Mouse wheel zoom/pan support
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+          const hzShift = (e.deltaX / canvasWidth) * displaySpanHz;
+          updateViewportBounds(displayMinHz + hzShift, displaySpanHz);
+        } else {
+          const factor = e.deltaY > 0 ? 1.08 : 0.92;
+          const centerHz = displayMinHz + displaySpanHz * 0.5;
+          const nextSpan = Math.max(1000, Math.min(4200, displaySpanHz * factor));
+          updateViewportBounds(centerHz - nextSpan * 0.5, nextSpan);
+        }
+        if (!isRunning) drawVisualizer();
+      }, { passive: false });
+
+      function resizeCanvas() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2.0);
+        const rect = canvas.getBoundingClientRect();
+        canvasWidth = Math.max(240, Math.floor(rect.width));
+        canvasHeight = Math.max(240, Math.floor(rect.height));
+        waterfallHeight = Math.max(120, canvasHeight - TOP_HEADER_HEIGHT);
+
+        canvas.width = Math.round(canvasWidth * dpr);
+        canvas.height = Math.round(canvasHeight * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        waterfallCanvas.width = canvasWidth;
+        waterfallCanvas.height = waterfallHeight;
+        needsFullWaterfallRedraw = true;
+      }
+
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
+      updateViewportBounds(displayMinHz, displaySpanHz);
+
+      function beginHoldCalibration(e) {
+        if (e && e.cancelable) e.preventDefault();
+        if (!isRunning) return;
+        isCalibratingHold = true;
+        calibrateHoldBtn.classList.add('calibrating-active');
+        calibBtnDot.className = 'w-2 h-2 rounded-full bg-[#f5efe6] animate-ping';
+        calibBtnText.textContent = 'КАЛИБРОВКА';
+      }
+
+      function endHoldCalibration(e) {
+        if (!isCalibratingHold) return;
+        if (e && e.cancelable) e.preventDefault();
+        isCalibratingHold = false;
+        calibrateHoldBtn.classList.remove('calibrating-active');
+        calibBtnDot.className = 'w-2 h-2 rounded-full bg-[#d6c7b2]';
+        calibBtnText.textContent = 'КАЛИБРОВКА';
+      }
+
+      calibrateHoldBtn.addEventListener('pointerdown', beginHoldCalibration);
+      window.addEventListener('pointerup', endHoldCalibration);
+      window.addEventListener('pointercancel', endHoldCalibration);
+      calibrateHoldBtn.addEventListener('touchstart', beginHoldCalibration, { passive: false });
+      window.addEventListener('touchend', endHoldCalibration);
+
+      function updateMicButtonUI(active) {
+        if (active) {
+          micStatusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+          micToggleText.textContent = 'Микрофон: Вкл';
+          micToggleBtn.className =
+            'pointer-events-auto py-3 px-4 rounded-xl bg-[#2c2622]/90 backdrop-blur-md border border-[#786c5e] text-[#f5efe6] font-semibold text-xs sm:text-sm flex items-center gap-2 shadow-xl active:scale-95 transition cursor-pointer shrink-0';
+        } else {
+          micStatusDot.className = 'w-2 h-2 rounded-full bg-stone-500';
+          micToggleText.textContent = 'Микрофон: Выкл';
+          micToggleBtn.className =
+            'pointer-events-auto py-3 px-4 rounded-xl bg-[#211e1b]/90 backdrop-blur-md border border-[#3d3731] text-[#a8a096] font-semibold text-xs sm:text-sm flex items-center gap-2 shadow-xl active:scale-95 transition cursor-pointer shrink-0';
+        }
+      }
+
+      const BT_DEVICE_REGEX = /bluetooth|airpods|buds|headset|hands-free|handsfree|sco|wireless|bt\b/i;
+      const BUILTIN_MIC_REGEX = /built-in|internal|iphone|ipad|phone|bottom|back|front|speakerphone|встроенный|телефон/i;
+
+      async function acquireBuiltInMicStream() {
+        const baseAudioConstraints = {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1
+        };
+
+        // IMPORTANT: Call getUserMedia immediately inside the user gesture handler
+        // so mobile browsers (iOS Safari / Android Chrome) always trigger the permission prompt.
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: baseAudioConstraints });
+        } catch (_) {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+
+        // Once permission is granted, check if the OS routed us to a Bluetooth headset mic.
+        // If so, switch to the phone's built-in mic so Bluetooth stays in A2DP stereo mode.
+        try {
+          const activeTrack = stream.getAudioTracks()[0];
+          const activeLabel = activeTrack ? activeTrack.label || '' : '';
+          if (BT_DEVICE_REGEX.test(activeLabel) && navigator.mediaDevices.enumerateDevices) {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const nonBtInputs = devices.filter(
+              (d) => d.kind === 'audioinput' && d.deviceId && !BT_DEVICE_REGEX.test(d.label || '')
+            );
+            const preferredBuiltIn =
+              nonBtInputs.find((d) => BUILTIN_MIC_REGEX.test(d.label || '')) || nonBtInputs[0];
+
+            if (preferredBuiltIn) {
+              stream.getTracks().forEach((t) => t.stop());
+              stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                  ...baseAudioConstraints,
+                  deviceId: { exact: preferredBuiltIn.deviceId }
+                }
+              });
+            }
+          }
+        } catch (_) {}
+
+        return stream;
+      }
+
+      function releaseOSAudioSession() {
+        // Fix for iOS Safari / WebKit keeping Bluetooth locked in PlayAndRecord (HFP) mode after stopping mic
+        if ('audioSession' in navigator && navigator.audioSession) {
+          try {
+            navigator.audioSession.type = 'ambient';
+          } catch (_) {}
+          try {
+            navigator.audioSession.type = 'auto';
+          } catch (_) {}
+        }
+      }
+
+      async function startMicrophone() {
+        micErrorBox.classList.add('hidden');
+        try {
+          // Ensure any previous session is cleaned up before requesting mic
+          if (mediaStream || audioCtx) {
+            await stopMicrophone();
+          }
+
+          const stream = await acquireBuiltInMicStream();
+          mediaStream = stream;
+
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          audioCtx = new AudioContextClass();
+          if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+          }
+
+          sourceNode = audioCtx.createMediaStreamSource(stream);
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 4096;
+          analyser.smoothingTimeConstant = 0.55;
+
+          sourceNode.connect(analyser);
+
+          const binCount = analyser.frequencyBinCount;
+          rawFreqData = new Float32Array(binCount);
+          smoothedEnvelope = new Float32Array(binCount);
+          temporalSpectrum = new Float32Array(binCount);
+          normalizedRidge = new Float32Array(binCount);
+          temporalSpectrum.fill(-110);
+
+          startOverlay.classList.add('hidden');
+          controlsBar.classList.remove('hidden');
+          updateMicButtonUI(true);
+          resizeCanvas();
+
+          isRunning = true;
+          requestAnimationFrame(animateLoop);
+        } catch (err) {
+          await stopMicrophone();
+          micErrorBox.textContent =
+            'Не удалось получить доступ к микрофону. Разрешите использование микрофона в настройках браузера.';
+          micErrorBox.classList.remove('hidden');
+        }
+      }
+
+      async function stopMicrophone() {
+        isRunning = false;
+        isCalibratingHold = false;
+        calibrateHoldBtn.classList.remove('calibrating-active');
+        calibBtnDot.className = 'w-2 h-2 rounded-full bg-[#d6c7b2]';
+
+        if (sourceNode) {
+          try { sourceNode.disconnect(); } catch (_) {}
+          sourceNode = null;
+        }
+
+        if (analyser) {
+          try { analyser.disconnect(); } catch (_) {}
+          analyser = null;
+        }
+
+        if (mediaStream) {
+          const tracks = mediaStream.getTracks();
+          tracks.forEach((t) => {
+            try {
+              t.enabled = false;
+              t.stop();
+              mediaStream.removeTrack(t);
+            } catch (_) {}
+          });
+          mediaStream = null;
+        }
+
+        if (audioCtx) {
+          const ctxToClose = audioCtx;
+          audioCtx = null;
+          try {
+            if (ctxToClose.state !== 'closed') {
+              await ctxToClose.suspend();
+              await ctxToClose.close();
+            }
+          } catch (_) {}
+        }
+
+        releaseOSAudioSession();
+
+        trackedFormants = [];
+        updateMicButtonUI(false);
+        drawVisualizer();
+      }
+
+      function toggleMicrophone() {
+        if (isRunning) {
+          stopMicrophone();
+        } else {
+          startMicrophone();
+        }
+      }
+
+      startMicBtn.addEventListener('click', startMicrophone);
+      micToggleBtn.addEventListener('click', toggleMicrophone);
+
+      // Immediately release microphone & Bluetooth audio lock when minimizing browser, switching apps, or closing tab
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden && (isRunning || mediaStream || audioCtx)) {
+          stopMicrophone();
+        }
+      });
+      window.addEventListener('pagehide', () => {
+        if (isRunning || mediaStream || audioCtx) {
+          stopMicrophone();
+        }
+      });
+      window.addEventListener('beforeunload', () => {
+        if (isRunning || mediaStream || audioCtx) {
+          stopMicrophone();
+        }
+      });
+
+      function freqToBin(hz, sampleRate, binCount) {
+        const nyquist = sampleRate / 2;
+        return Math.max(0, Math.min(binCount - 1, Math.round((hz / nyquist) * binCount)));
+      }
+
+      function binToFreq(bin, sampleRate, binCount) {
+        const nyquist = sampleRate / 2;
+        return (bin / binCount) * nyquist;
+      }
+
+      function analyzeWhisperFormants() {
+        analyser.getFloatFrequencyData(rawFreqData);
+        const sampleRate = audioCtx.sampleRate || 48000;
+        const binCount = analyser.frequencyBinCount;
+
+        const minAnBin = freqToBin(ABS_MIN_HZ, sampleRate, binCount);
+        const maxAnBin = freqToBin(ABS_MAX_HZ, sampleRate, binCount);
+
+        // 1. Temporal smoothing + gentle high-frequency pre-emphasis for whisper
+        for (let b = minAnBin; b <= maxAnBin; b++) {
+          let val = rawFreqData[b];
+          if (!Number.isFinite(val) || val < -140) val = -140;
+          const freq = binToFreq(b, sampleRate, binCount);
+          const preEmphasisDb = Math.max(0, (freq - 1000) / 1000) * 3.4;
+          const boosted = val + preEmphasisDb;
+          temporalSpectrum[b] = temporalSpectrum[b] * 0.56 + boosted * 0.44;
+        }
+
+        // 2. Smooth spectral envelope (~150 Hz triangular window) to isolate vocal tract hills
+        const binHz = sampleRate / (binCount * 2);
+        const halfWindowBins = Math.max(5, Math.round(78 / binHz));
+        let sumEnv = 0;
+        let countEnv = 0;
+        let maxEnvDb = -160;
+
+        for (let b = minAnBin; b <= maxAnBin; b++) {
+          let weightedSum = 0;
+          let weightTotal = 0;
+          for (let k = -halfWindowBins; k <= halfWindowBins; k++) {
+            const idx = b + k;
+            if (idx >= minAnBin && idx <= maxAnBin) {
+              const w = halfWindowBins + 1 - Math.abs(k);
+              weightedSum += temporalSpectrum[idx] * w;
+              weightTotal += w;
+            }
+          }
+          const envVal = weightedSum / weightTotal;
+          smoothedEnvelope[b] = envVal;
+          sumEnv += envVal;
+          countEnv++;
+          if (envVal > maxEnvDb) maxEnvDb = envVal;
+        }
+
+        const meanEnvDb = countEnv > 0 ? sumEnv / countEnv : -110;
+
+        // 3. Zero-threshold local ridge normalization (0..1)
+        const spanRadius = Math.max(12, Math.round(310 / binHz));
+        const globalSpan = Math.max(0.4, maxEnvDb - meanEnvDb);
+
+        for (let b = minAnBin; b <= maxAnBin; b++) {
+          let localMin = smoothedEnvelope[b];
+          let localMax = smoothedEnvelope[b];
+          for (let k = -spanRadius; k <= spanRadius; k += 2) {
+            const idx = Math.max(minAnBin, Math.min(maxAnBin, b + k));
+            const v = smoothedEnvelope[idx];
+            if (v < localMin) localMin = v;
+            if (v > localMax) localMax = v;
+          }
+          const localRange = Math.max(0.35, localMax - localMin);
+          const localNorm = Math.max(0, Math.min(1, (smoothedEnvelope[b] - localMin) / localRange));
+          const globalNorm = Math.max(0, Math.min(1, (smoothedEnvelope[b] - meanEnvDb) / globalSpan));
+          normalizedRidge[b] = Math.pow(localNorm * 0.75 + globalNorm * 0.25, 1.55);
+        }
+
+        // Save compact copy of normalized ridge into history buffer for crisp panning
+        const rowCopy = new Uint8Array(maxAnBin + 1);
+        for (let b = minAnBin; b <= maxAnBin; b++) {
+          rowCopy[b] = Math.min(255, Math.max(0, Math.round(normalizedRidge[b] * 255)));
+        }
+        ridgeHistory.unshift(rowCopy);
+        if (ridgeHistory.length > MAX_HISTORY_ROWS) {
+          ridgeHistory.pop();
+        }
+
+        // 4. Find all candidate formant peaks across the entire spectrum
+        const searchStartBin = freqToBin(FORMANT_SEARCH_MIN_HZ, sampleRate, binCount);
+        const searchEndBin = freqToBin(FORMANT_SEARCH_MAX_HZ, sampleRate, binCount);
+        const rawCandidates = [];
+
+        const neighborCheck = Math.max(3, Math.round(55 / binHz));
+        const prominenceRadiusBins = Math.max(10, Math.round(250 / binHz));
+
+        for (let b = searchStartBin; b <= searchEndBin; b++) {
+          const val = smoothedEnvelope[b];
+          let isLocalMax = true;
+          for (let k = -neighborCheck; k <= neighborCheck; k++) {
+            if (k !== 0 && smoothedEnvelope[b + k] > val) {
+              isLocalMax = false;
+              break;
+            }
+          }
+          if (!isLocalMax) continue;
+
+          let leftMin = val;
+          for (let k = b - 1; k >= Math.max(minAnBin, b - prominenceRadiusBins); k--) {
+            if (smoothedEnvelope[k] < leftMin) leftMin = smoothedEnvelope[k];
+          }
+          let rightMin = val;
+          for (let k = b + 1; k <= Math.min(maxAnBin, b + prominenceRadiusBins); k++) {
+            if (smoothedEnvelope[k] < rightMin) rightMin = smoothedEnvelope[k];
+          }
+
+          const prominenceDb = val - Math.max(leftMin, rightMin);
+          const ridgeVal = normalizedRidge[b];
+
+          // Require both a clear local ridge and meaningful dB prominence
+          if (ridgeVal < 0.34 || prominenceDb < 0.65) continue;
+
+          // Parabolic interpolation for sub-bin frequency accuracy
+          const yL = smoothedEnvelope[Math.max(minAnBin, b - 1)];
+          const yC = val;
+          const yR = smoothedEnvelope[Math.min(maxAnBin, b + 1)];
+          const denom = yL - 2 * yC + yR;
+          const deltaBin = Math.abs(denom) > 1e-5 ? Math.max(-0.5, Math.min(0.5, 0.5 * (yL - yR) / denom)) : 0;
+
+          rawCandidates.push({
+            bin: b,
+            freq: binToFreq(b + deltaBin, sampleRate, binCount),
+            prom: ridgeVal,
+            score: ridgeVal * 2.0 + prominenceDb * 0.45
+          });
+        }
+
+        // Non-maximum suppression so adjacent micro-bumps on the same formant don't duplicate
+        rawCandidates.sort((a, b) => b.score - a.score);
+        const selectedPeaks = [];
+        for (let i = 0; i < rawCandidates.length; i++) {
+          const cand = rawCandidates[i];
+          const tooClose = selectedPeaks.some(
+            (p) => Math.abs(p.freq - cand.freq) < MIN_PEAK_SEPARATION_HZ
+          );
+          if (!tooClose) {
+            selectedPeaks.push(cand);
+          }
+        }
+        selectedPeaks.sort((a, b) => a.freq - b.freq);
+
+        // 5. Update stateful multi-formant tracks with temporal persistence filtering
+        const usedCandidate = new Array(selectedPeaks.length).fill(false);
+
+        for (let t = 0; t < trackedFormants.length; t++) {
+          const track = trackedFormants[t];
+          let bestIdx = -1;
+          let bestDist = TRACK_MATCH_RADIUS_HZ;
+
+          for (let c = 0; c < selectedPeaks.length; c++) {
+            if (usedCandidate[c]) continue;
+            const dist = Math.abs(selectedPeaks[c].freq - track.hz);
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestIdx = c;
+            }
+          }
+
+          if (bestIdx !== -1) {
+            usedCandidate[bestIdx] = true;
+            const match = selectedPeaks[bestIdx];
+            const driftHz = Math.abs(match.freq - track.hz);
+
+            // Smoothly update frequency and prominence
+            track.hz = track.hz * 0.80 + match.freq * 0.20;
+            track.prom = track.prom * 0.72 + match.prom * 0.28;
+            track.missedFrames = 0;
+
+            // Count frame as stable only if the peak isn't jumping erratically
+            if (driftHz <= MAX_STABLE_DRIFT_HZ) {
+              track.stableFrames = Math.min(CONFIRM_STABLE_FRAMES + 10, track.stableFrames + 1);
+            } else {
+              track.stableFrames = Math.max(1, track.stableFrames - 0.5);
+            }
+
+            if (track.stableFrames >= CONFIRM_STABLE_FRAMES) {
+              track.isConfirmed = true;
+            }
+          } else {
+            track.missedFrames += 1;
+            track.stableFrames = Math.max(0, track.stableFrames - 1.5);
+            track.prom *= 0.88;
+            if (track.missedFrames > 6 || track.stableFrames < 4) {
+              track.isConfirmed = false;
+            }
+          }
+
+          // Smooth fade-in and fade-out for confirmed stable formants
+          if (track.isConfirmed && track.missedFrames <= 3) {
+            track.displayAlpha = Math.min(1.0, (track.displayAlpha || 0) + 0.16);
+          } else {
+            track.displayAlpha = Math.max(0.0, (track.displayAlpha || 0) - 0.14);
+          }
+        }
+
+        // Spawn probationary tracks for newly appeared peaks (hidden until proven stable)
+        for (let c = 0; c < selectedPeaks.length; c++) {
+          if (usedCandidate[c]) continue;
+          const cand = selectedPeaks[c];
+          if (cand.prom >= 0.38) {
+            trackedFormants.push({
+              id: nextTrackId++,
+              hz: cand.freq,
+              prom: cand.prom,
+              stableFrames: 1,
+              missedFrames: 0,
+              isConfirmed: false,
+              displayAlpha: 0
+            });
+          }
+        }
+
+        // Prune expired tracks and merge tracks that drifted too close together
+        trackedFormants = trackedFormants.filter(
+          (t) => t.missedFrames <= 8 && (t.stableFrames > 0 || t.displayAlpha > 0.05)
+        );
+        trackedFormants.sort((a, b) => a.hz - b.hz);
+
+        for (let i = trackedFormants.length - 1; i > 0; i--) {
+          if (Math.abs(trackedFormants[i].hz - trackedFormants[i - 1].hz) < MIN_PEAK_SEPARATION_HZ * 0.8) {
+            if (trackedFormants[i].stableFrames >= trackedFormants[i - 1].stableFrames) {
+              trackedFormants.splice(i - 1, 1);
+            } else {
+              trackedFormants.splice(i, 1);
+            }
+          }
+        }
+
+        // 6. While holding the calibration button, lock dashed reference lines to confirmed stable formants
+        if (isCalibratingHold) {
+          const activeInView = trackedFormants.filter(
+            (t) => t.isConfirmed && t.displayAlpha >= 0.5 && t.hz >= displayMinHz && t.hz <= displayMaxHz
+          );
+          if (activeInView.length > 0) {
+            if (refLines.length !== activeInView.length) {
+              refLines = activeInView.map((t) => t.hz);
+            } else {
+              for (let i = 0; i < activeInView.length; i++) {
+                refLines[i] = refLines[i] * 0.82 + activeInView[i].hz * 0.18;
+              }
+            }
+          }
+        }
+      }
+
+      function freqToX(hz, width) {
+        return ((hz - displayMinHz) / (displayMaxHz - displayMinHz)) * width;
+      }
+
+      function xToFreq(x, width) {
+        return displayMinHz + (x / width) * (displayMaxHz - displayMinHz);
+      }
+
+      function renderRowPixels(targetData, rowOffsetPx, width, ridgeRow, sampleRate, binCount) {
+        const nyquist = sampleRate / 2;
+        for (let x = 0; x < width; x++) {
+          const freq = xToFreq(x, width);
+          const exactBin = (freq / nyquist) * binCount;
+          const b0 = Math.max(0, Math.min(ridgeRow.length - 1, Math.floor(exactBin)));
+          const b1 = Math.max(0, Math.min(ridgeRow.length - 1, b0 + 1));
+          const frac = exactBin - b0;
+
+          const val255 = Math.round(ridgeRow[b0] * (1 - frac) + ridgeRow[b1] * frac);
+          const lutIdx = val255 * 3;
+          const r = colorLUT[lutIdx];
+          const g = colorLUT[lutIdx + 1];
+          const b = colorLUT[lutIdx + 2];
+
+          for (let dy = 0; dy < WATERFALL_SPEED_PX; dy++) {
+            const y = rowOffsetPx + dy;
+            if (y >= waterfallHeight) break;
+            const idx = (y * width + x) * 4;
+            targetData[idx] = r;
+            targetData[idx + 1] = g;
+            targetData[idx + 2] = b;
+            targetData[idx + 3] = 255;
+          }
+        }
+      }
+
+      function updateWaterfallBitmap() {
+        const w = waterfallCanvas.width;
+        const h = waterfallCanvas.height;
+        if (w <= 0 || h <= 0 || ridgeHistory.length === 0) return;
+
+        const sampleRate = audioCtx ? audioCtx.sampleRate : 48000;
+        const binCount = analyser ? analyser.frequencyBinCount : 2048;
+
+        if (needsFullWaterfallRedraw) {
+          needsFullWaterfallRedraw = false;
+          const fullImg = waterfallCtx.createImageData(w, h);
+          const data = fullImg.data;
+          // Fill desaturated dark background matching LUT 0.0
+          for (let i = 0; i < data.length; i += 4) {
+            data[i] = colorLUT[0];
+            data[i + 1] = colorLUT[1];
+            data[i + 2] = colorLUT[2];
+            data[i + 3] = 255;
+          }
+          const maxRows = Math.min(ridgeHistory.length, Math.ceil(h / WATERFALL_SPEED_PX));
+          for (let r = 0; r < maxRows; r++) {
+            renderRowPixels(data, r * WATERFALL_SPEED_PX, w, ridgeHistory[r], sampleRate, binCount);
+          }
+          waterfallCtx.putImageData(fullImg, 0, 0);
+        } else {
+          // Scroll existing waterfall down by WATERFALL_SPEED_PX and draw newest row at top
+          waterfallCtx.drawImage(
+            waterfallCanvas,
+            0, 0, w, h - WATERFALL_SPEED_PX,
+            0, WATERFALL_SPEED_PX, w, h - WATERFALL_SPEED_PX
+          );
+          const rowImg = waterfallCtx.createImageData(w, WATERFALL_SPEED_PX);
+          renderRowPixels(rowImg.data, 0, w, ridgeHistory[0], sampleRate, binCount);
+          waterfallCtx.putImageData(rowImg, 0, 0);
+        }
+      }
+
+      function drawVisualizer() {
+        const w = canvasWidth;
+        const h = canvasHeight;
+        const wfTop = TOP_HEADER_HEIGHT;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // 1. Update and draw pure spectrogram waterfall
+        updateWaterfallBitmap();
+        ctx.drawImage(waterfallCanvas, 0, wfTop, w, waterfallHeight);
+
+        // 2. Draw subtle frequency grid lines over the waterfall
+        ctx.lineWidth = 1;
+        ctx.font = '500 10px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+
+        const gridStepHz = displaySpanHz > 2600 ? 500 : 250;
+        const firstGridHz = Math.ceil(displayMinHz / gridStepHz) * gridStepHz;
+
+        for (let freq = firstGridHz; freq <= displayMaxHz; freq += gridStepHz) {
+          const x = freqToX(freq, w);
+          ctx.strokeStyle = 'rgba(231, 226, 218, 0.11)';
+          ctx.beginPath();
+          ctx.moveTo(x, wfTop);
+          ctx.lineTo(x, h);
+          ctx.stroke();
+        }
+
+        // 3. Draw top live spectrum strip (shows current formant hills and frequencies)
+        ctx.fillStyle = '#1b1917';
+        ctx.fillRect(0, 0, w, wfTop);
+
+        if (ridgeHistory.length > 0 && analyser) {
+          const latestRow = ridgeHistory[0];
+          const sampleRate = audioCtx ? audioCtx.sampleRate : 48000;
+          const binCount = analyser ? analyser.frequencyBinCount : 2048;
+          const nyquist = sampleRate / 2;
+
+          ctx.beginPath();
+          ctx.moveTo(0, wfTop - 20);
+          for (let x = 0; x < w; x += 2) {
+            const freq = xToFreq(x, w);
+            const exactBin = (freq / nyquist) * binCount;
+            const b0 = Math.max(0, Math.min(latestRow.length - 1, Math.floor(exactBin)));
+            const norm = latestRow[b0] / 255;
+            const y = (wfTop - 20) - norm * 42;
+            ctx.lineTo(x, y);
+          }
+          ctx.lineTo(w, wfTop - 20);
+          ctx.closePath();
+
+          const envGrad = ctx.createLinearGradient(0, wfTop - 64, 0, wfTop - 20);
+          envGrad.addColorStop(0, 'rgba(214, 199, 178, 0.34)');
+          envGrad.addColorStop(1, 'rgba(214, 199, 178, 0.03)');
+          ctx.fillStyle = envGrad;
+          ctx.fill();
+
+          ctx.strokeStyle = 'rgba(231, 226, 218, 0.85)';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+
+        // 4. Draw frequency ruler along the bottom edge of the top strip (above waterfall)
+        ctx.fillStyle = '#24211e';
+        ctx.fillRect(0, wfTop - 20, w, 20);
+        ctx.strokeStyle = 'rgba(92, 83, 73, 0.8)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, wfTop);
+        ctx.lineTo(w, wfTop);
+        ctx.stroke();
+
+        for (let freq = Math.ceil(displayMinHz / 100) * 100; freq <= displayMaxHz; freq += 100) {
+          const x = freqToX(freq, w);
+          const isMajor = freq % gridStepHz === 0;
+          ctx.strokeStyle = isMajor ? 'rgba(184, 175, 164, 0.65)' : 'rgba(184, 175, 164, 0.25)';
+          ctx.beginPath();
+          ctx.moveTo(x, wfTop - (isMajor ? 6 : 3));
+          ctx.lineTo(x, wfTop);
+          ctx.stroke();
+
+          if (isMajor) {
+            ctx.fillStyle = '#a8a096';
+            ctx.font = '500 10px "JetBrains Mono", monospace';
+            ctx.fillText(`${freq}`, x, wfTop - 7);
+          }
+        }
+
+        // 5. Draw ONLY confirmed stable formant peak markers & Hz labels in the top strip
+        const visiblePeaks = [];
+        for (let i = 0; i < trackedFormants.length; i++) {
+          const track = trackedFormants[i];
+          if (!track.isConfirmed && track.displayAlpha <= 0.08) continue;
+          const px = freqToX(track.hz, w);
+          if (px < 8 || px > w - 8) continue;
+
+          const py = (wfTop - 20) - Math.max(0.15, Math.min(1, track.prom)) * 42;
+          const label = `${Math.round(track.hz)}`;
+          ctx.font = '700 10px "JetBrains Mono", monospace';
+          const boxW = ctx.measureText(label).width + 10;
+
+          visiblePeaks.push({
+            hz: track.hz,
+            px,
+            py,
+            label,
+            boxW,
+            labelCenterX: Math.max(boxW * 0.5 + 3, Math.min(w - boxW * 0.5 - 3, px)),
+            alpha: Math.min(1, track.displayAlpha)
+          });
+        }
+
+        // Prevent horizontal overlap between adjacent formant frequency badges
+        for (let pass = 0; pass < 3; pass++) {
+          for (let i = 0; i < visiblePeaks.length - 1; i++) {
+            const left = visiblePeaks[i];
+            const right = visiblePeaks[i + 1];
+            const minGap = (left.boxW + right.boxW) * 0.5 + 4;
+            const diff = right.labelCenterX - left.labelCenterX;
+            if (diff < minGap) {
+              const push = (minGap - diff) * 0.5;
+              left.labelCenterX = Math.max(left.boxW * 0.5 + 2, left.labelCenterX - push);
+              right.labelCenterX = Math.min(w - right.boxW * 0.5 - 2, right.labelCenterX + push);
+            }
+          }
+        }
+
+        visiblePeaks.forEach((peak) => {
+          ctx.save();
+          ctx.globalAlpha = peak.alpha;
+
+          // Subtle leader line from badge to exact peak dot
+          const boxY = 4;
+          const boxH = 17;
+          ctx.strokeStyle = 'rgba(214, 199, 178, 0.55)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(peak.labelCenterX, boxY + boxH);
+          ctx.lineTo(peak.px, peak.py);
+          ctx.stroke();
+
+          // Small pointer dot on the live envelope hill
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(peak.px, peak.py, 3.2, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Live formant frequency tag above the hill
+          const boxX = peak.labelCenterX - peak.boxW * 0.5;
+          ctx.fillStyle = 'rgba(33, 30, 27, 0.94)';
+          ctx.strokeStyle = 'rgba(214, 199, 178, 0.75)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(boxX, boxY, peak.boxW, boxH, 4);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#f5efe6';
+          ctx.font = '700 10px "JetBrains Mono", monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(peak.label, peak.labelCenterX, boxY + 12);
+          ctx.restore();
+        });
+
+        // 6. Draw VERTICAL DASHED CALIBRATION LINES with draggable frequency badges on the ruler
+        refBadgeRects = [];
+        refLines.forEach((refHz, idx) => {
+          const rx = freqToX(refHz, w);
+          if (rx < -20 || rx > w + 20) return;
+
+          const isBeingDragged = idx === draggingRefIndex;
+
+          ctx.save();
+          ctx.setLineDash([7, 6]);
+          ctx.lineWidth = isBeingDragged ? 2.5 : 2;
+          if (isBeingDragged && isHoveringTrash) {
+            ctx.strokeStyle = 'rgba(248, 113, 113, 0.95)';
+          } else if (isCalibratingHold || isBeingDragged) {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.98)';
+          } else {
+            ctx.strokeStyle = 'rgba(231, 226, 218, 0.9)';
+          }
+          ctx.beginPath();
+          ctx.moveTo(rx, wfTop);
+          ctx.lineTo(rx, h);
+          ctx.stroke();
+          ctx.restore();
+
+          // Draggable reference Hz badge inside the ruler strip (above wfTop)
+          const refText = `${Math.round(refHz)}`;
+          ctx.font = '700 10px "JetBrains Mono", monospace';
+          const tw = ctx.measureText(refText).width;
+          const badgeW = tw + 12;
+          const badgeH = 18;
+          const badgeX = Math.max(2, Math.min(w - badgeW - 2, rx - badgeW * 0.5));
+          const badgeY = wfTop - 19;
+
+          refBadgeRects.push({
+            index: idx,
+            x: badgeX,
+            y: badgeY,
+            w: badgeW,
+            h: badgeH
+          });
+
+          ctx.save();
+          if (isBeingDragged && isHoveringTrash) {
+            ctx.fillStyle = '#7f1d1d';
+            ctx.strokeStyle = '#f87171';
+          } else if (isBeingDragged) {
+            ctx.fillStyle = '#3f3832';
+            ctx.strokeStyle = '#ffffff';
+          } else {
+            ctx.fillStyle = '#2c2723';
+            ctx.strokeStyle = isCalibratingHold ? '#ffffff' : '#d6c7b2';
+          }
+          ctx.lineWidth = isBeingDragged ? 1.5 : 1;
+          ctx.beginPath();
+          ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 5);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#f5efe6';
+          ctx.textAlign = 'center';
+          ctx.fillText(refText, badgeX + badgeW * 0.5, badgeY + 12.5);
+          ctx.restore();
+        });
+
+        // 7. Draw floating Trash Bin at the right edge when dragging a reference line badge
+        if (draggingRefIndex !== -1) {
+          const tr = getTrashZoneRect(w);
+          ctx.save();
+          ctx.fillStyle = isHoveringTrash
+            ? 'rgba(153, 27, 27, 0.96)'
+            : 'rgba(38, 34, 30, 0.94)';
+          ctx.strokeStyle = isHoveringTrash
+            ? '#f87171'
+            : 'rgba(214, 199, 178, 0.65)';
+          ctx.lineWidth = isHoveringTrash ? 2 : 1.2;
+
+          ctx.beginPath();
+          ctx.roundRect(tr.x, tr.y, tr.w, tr.h, 10);
+          ctx.fill();
+          ctx.stroke();
+
+          // Trash can vector icon centered in the floating target
+          const cx = tr.x + tr.w * 0.5;
+          const cy = tr.y + tr.h * 0.5;
+          ctx.strokeStyle = isHoveringTrash ? '#fecaca' : '#e7e2da';
+          ctx.lineWidth = 1.7;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          // Lid
+          ctx.beginPath();
+          ctx.moveTo(cx - 8, cy - 6);
+          ctx.lineTo(cx + 8, cy - 6);
+          ctx.moveTo(cx - 3, cy - 6);
+          ctx.lineTo(cx - 3, cy - 8.5);
+          ctx.lineTo(cx + 3, cy - 8.5);
+          ctx.lineTo(cx + 3, cy - 6);
+          // Body
+          ctx.moveTo(cx - 6.5, cy - 6);
+          ctx.lineTo(cx - 5.2, cy + 8);
+          ctx.lineTo(cx + 5.2, cy + 8);
+          ctx.lineTo(cx + 6.5, cy - 6);
+          // Inner vertical lines
+          ctx.moveTo(cx - 2, cy - 2.5);
+          ctx.lineTo(cx - 2, cy + 4.5);
+          ctx.moveTo(cx + 2, cy - 2.5);
+          ctx.lineTo(cx + 2, cy + 4.5);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      drawVisualizer();
+
+      function animateLoop() {
+        if (!isRunning) return;
+        analyzeWhisperFormants();
+        drawVisualizer();
+        requestAnimationFrame(animateLoop);
+      }
+    })();
+  </script>
+</body>
+</html>
